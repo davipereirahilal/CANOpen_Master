@@ -270,6 +270,62 @@ static bool parseU16(const String& s, uint16_t& out, uint16_t minV, uint16_t max
 }
 
 
+
+// Escreve 0x1016:<subIdx> = (port<<24) | (producerId<<16) | expected_ms
+static CO_SDO_abortCode_t setConsumerHeartbeatEntryAtSub(
+    CO_SDOclient_t* sdoClient,
+    uint8_t nodeId,         // nó alvo (onde está o OD que será escrito)
+    uint8_t subIdx,         // 1..N (sub-índice da entrada)
+    uint8_t producerId,     // Node-ID a ser vigiado
+    uint16_t expected_ms,   // tempo esperado (ms)
+    uint8_t portCode        // 1 = CANmodule 1 (no seu port); 0 desabilita
+){
+    uint32_t value = 0;
+    if (producerId != 0 && expected_ms != 0 && portCode != 0) {
+        value = ((uint32_t)portCode << 24) |
+                ((uint32_t)producerId << 16) |
+                (uint32_t)(expected_ms & 0xFFFFu);
+    }
+    return writeSDOUint32(sdoClient, nodeId, 0x1016, subIdx, value);
+}
+
+
+// Procura um slot em 0x1016 do nó remoto:
+// - Se já existir uma entrada para producerId, devolve esse subIdx.
+// - Senão, devolve o primeiro slot "livre" (value==0 ou port==0 ou prod==0 ou time==0).
+// Retorna true se achou um subIdx válido.
+static bool findConsumerEntrySlot(CO_SDOclient_t* sdoClient,
+                                  uint8_t nodeId,
+                                  uint8_t producerId,
+                                  uint8_t* outSubIdx) {
+  if (!outSubIdx) return false;
+
+  // lê 0x1016:00 = nº de entradas
+  uint8_t sub0 = 0;
+  CO_SDO_abortCode_t ac0 = readSDOUint8(sdoClient, nodeId, 0x1016, 0x00, &sub0);
+  if (ac0 != CO_SDO_AB_NONE || sub0 == 0) return false;
+
+  int firstFree = -1;
+  for (uint8_t si = 1; si <= sub0; ++si) {
+    uint32_t v = 0;
+    CO_SDO_abortCode_t ac = readSDOUint32(sdoClient, nodeId, 0x1016, si, &v);
+    if (ac != CO_SDO_AB_NONE) continue; // tenta próximo
+
+    uint8_t  port = (uint8_t)((v >> 24) & 0xFF);
+    uint8_t  prod = (uint8_t)((v >> 16) & 0xFF);
+    uint16_t tim  = (uint16_t)(v & 0xFFFFu);
+
+    // Já existe entrada para esse producerId? Use esse slot.
+    if (prod == producerId && port != 0 && tim != 0) { *outSubIdx = si; return true; }
+
+    // Memoriza primeiro livre/desativado
+    if (firstFree < 0 && (v == 0 || port == 0 || prod == 0 || tim == 0)) firstFree = si;
+  }
+
+  if (firstFree > 0) { *outSubIdx = (uint8_t)firstFree; return true; }
+  return false; // cheio e sem slot desse producer
+}
+
 /**
  * Interpret and execute a command received over the serial port.
  * Supported commands (example):
@@ -311,19 +367,19 @@ static void processCommand(const String& cmd) {
             vTaskDelay(pdMS_TO_TICKS(10)); // small delay to avoid bus overload
         }
         
-    } else if (command == "reset") {
-        if (tokens.size() < 2) {
-            Serial.println("Usage: reset <nodeId>");
-            return;
-        }
-        uint8_t nodeId = (uint8_t)tokens[1].toInt();
-        Serial.print("Resetting and configuring node ");
-        Serial.println(nodeId);
-        if (resetMotor(nodeId, 100, 10000, 40000)) {
-            Serial.println("Node configured successfully.");
-        } else {
-            Serial.println("Failed to configure node.");
-        }
+    // } else if (command == "reset") {
+    //     if (tokens.size() < 2) {
+    //         Serial.println("Usage: reset <nodeId>");
+    //         return;
+    //     }
+    //     uint8_t nodeId = (uint8_t)tokens[1].toInt();
+    //     Serial.print("Resetting and configuring node ");
+    //     Serial.println(nodeId);
+    //     if (resetMotor(nodeId, 100, 10000, 40000)) {
+    //         Serial.println("Node configured successfully.");
+    //     } else {
+    //         Serial.println("Failed to configure node.");
+    //     }
 
 
     } else if (command == "heartbeat") {
@@ -361,6 +417,7 @@ static void processCommand(const String& cmd) {
                 Serial.println(ac_cons, HEX);
             }
         }
+    //MASTER COMMANDS
     } else if (command == "master_info") {
         cmd_master_info();
         
@@ -395,6 +452,12 @@ static void processCommand(const String& cmd) {
         } else {
             Serial.printf("Failed to write 0x1017 in local OD (ODR=%d)\n", odr);
         }
+    
+    } else if(command == "get_master_entry"){
+        
+        Serial.println("Command not implemented yet.");
+    } else if(command == "set_master_entry"){
+        Serial.println("Command not implemented yet.");
 
     } else if (command == "get_node_heartbeat") {
         // Uso: get_node_heartbeat <nodeId>
@@ -440,9 +503,135 @@ static void processCommand(const String& cmd) {
             Serial.printf("SDO write 0x1017 failed (abort=0x%08X)\n", (unsigned)ac);
         }
     } else if (command == "get_consumer_entry") {
-         Serial.println("Command not implemented yet.");
+      // Uso: get_consumer_entry <nodeId> <subIdx>
+      // Lê 0x1016:<subIdx> (U32) do nó remoto e decodifica (prodId, expectedTime, portCode)
+      if (tokens.size() < 3) {
+          Serial.println("Usage: get_consumer_entry <nodeId> <subIdx>");
+          return;
+      }
+      uint8_t nodeId, subIdx;
+      if (!parseU8(tokens[1], nodeId, 1, 127) || !parseU8(tokens[2], subIdx, 1, 127)) {
+          Serial.println("Invalid <nodeId>/<subIdx> (valid: 1..127).");
+          return;
+      }
+      uint8_t port=0, prod=0; uint16_t t=0;
+      CO_SDO_abortCode_t ac = readConsumerHeartbeatEntry(CO->SDOclient, nodeId, subIdx, &port, &prod, &t);
+      if (ac == CO_SDO_AB_NONE) {
+          Serial.printf("Node %u 0x1016:%u => prodId=%u, time=%u ms, port=%u\n",
+                        nodeId, subIdx, prod, (unsigned)t, port);
+      } else {
+          Serial.printf("SDO read 0x1016:%u from node %u failed (abort=0x%08X)\n",
+                        subIdx, nodeId, (unsigned)ac);
+      }
     } else if (command == "set_consumer_entry") {
-        Serial.println("Command not implemented yet.");
+      // Sintaxe mínima: set_consumer_entry <nodeId> <producerId> <timeout_ms> [port=1]
+      if (tokens.size() < 4) {
+          Serial.println("Usage: set_consumer_entry <nodeId> <producerId> <timeout_ms> [port=1]");
+          return;
+      }
+      uint8_t nodeId, prodId, port = 1;
+      uint16_t expected = 0;
+
+      if (!parseU8(tokens[1], nodeId, 1, 127) ||
+          !parseU8(tokens[2], prodId, 0, 127) ||          // 0 => limpar
+          !parseU16(tokens[3], expected, 0, 65535)) {      // 0 => limpar
+          Serial.println("Invalid args. nodeId=1..127, producerId=0..127, timeout_ms=0..65535.");
+          return;
+      }
+      if (tokens.size() >= 5) {
+          if (!parseU8(tokens[4], port, 0, 255)) {         // 0 => limpar
+              Serial.println("Invalid port (0..255). Tip: use 1 para ativar no CANmodule 1.");
+              return;
+          }
+      }
+
+      // Descobre em qual subíndice escrever (o mesmo producerId ou primeiro livre)
+      uint8_t subIdx = 0;
+      if (!findConsumerEntrySlot(CO->SDOclient, nodeId, prodId, &subIdx)) {
+          Serial.println("No available slot in 0x1016 (remote is full and no entry for this producer).");
+          return;
+      }
+
+      // Escreve (expected=0 ou prodId=0 ou port=0 => limpa/desativa o slot)
+      CO_SDO_abortCode_t ac = setConsumerHeartbeatEntryAtSub(CO->SDOclient, nodeId, subIdx, prodId, expected, port);
+      if (ac != CO_SDO_AB_NONE) {
+          Serial.printf("SDO write 0x1016:%u on node %u failed (abort=0x%08X)\n", subIdx, nodeId, (unsigned)ac);
+          return;
+      }
+
+      // Readback para confirmar
+      uint8_t r_port=0, r_prod=0; uint16_t r_time=0;
+      CO_SDO_abortCode_t ac_rd = readConsumerHeartbeatEntry(CO->SDOclient, nodeId, subIdx, &r_port, &r_prod, &r_time);
+      if (ac_rd == CO_SDO_AB_NONE) {
+          if (r_port==0 || r_prod==0 || r_time==0) {
+              Serial.printf("OK: 1016:%u DESABILITADO no node %u\n", subIdx, nodeId);
+          } else {
+              Serial.printf("OK: 1016:%u -> producer=%u, expected=%u ms, port=%u (node %u)\n",
+                            subIdx, r_prod, (unsigned)r_time, r_port, nodeId);
+          }
+      } else {
+          Serial.printf("Written, but readback failed (abort=0x%08X)\n", (unsigned)ac_rd);
+      }
+
+    } else if (command == "clear_consumer_entry") {
+      if (tokens.size() < 3) {
+          Serial.println("Usage: clear_consumer_entry <nodeId> <subIdx>");
+          return;
+      }
+      uint8_t nodeId, subIdx;
+      if (!parseU8(tokens[1], nodeId, 1, 127) || !parseU8(tokens[2], subIdx, 1, 127)) {
+          Serial.println("Invalid <nodeId>/<subIdx> (1..127).");
+          return;
+      }
+      CO_SDO_abortCode_t ac = writeSDOUint32(CO->SDOclient, nodeId, 0x1016, subIdx, 0);
+      if (ac == CO_SDO_AB_NONE) {
+          Serial.printf("OK: 1016:%u limpo no node %u\n", subIdx, nodeId);
+      } else {
+          Serial.printf("SDO write failed (abort=0x%08X)\n", (unsigned)ac);
+      }
+
+    } else if (command == "dump_consumer_1016") {
+      // dump_consumer_1016 <nodeId>
+      if (tokens.size() < 2) {
+          Serial.println("Usage: dump_consumer_1016 <nodeId>");
+          return;
+      }
+      uint8_t nodeId;
+      if (!parseU8(tokens[1], nodeId, 1, 127)) {
+          Serial.println("Invalid <nodeId> (1..127).");
+          return;
+      }
+
+      uint8_t sub0 = 0;
+      CO_SDO_abortCode_t ac0 = readSDOUint8(CO->SDOclient, nodeId, 0x1016, 0x00, &sub0);
+      if (ac0 != CO_SDO_AB_NONE) {
+          Serial.printf("SDO read 1016:00 failed on node %u (abort=0x%08X)\n", nodeId, (unsigned)ac0);
+          return;
+      }
+      Serial.printf("Node %u 0x1016:00 = %u (entries)\n", nodeId, sub0);
+      if (sub0 == 0) {
+          Serial.println("=> Nenhum slot disponível (array com 0 entradas).");
+          return;
+      }
+
+      for (uint8_t si = 1; si <= sub0; ++si) {
+          uint32_t v = 0;
+          CO_SDO_abortCode_t ac = readSDOUint32(CO->SDOclient, nodeId, 0x1016, si, &v);
+          if (ac != CO_SDO_AB_NONE) {
+              Serial.printf("  1016:%u = <read failed> (abort=0x%08X)\n", si, (unsigned)ac);
+              continue;
+          }
+          uint8_t  port = (uint8_t)((v >> 24) & 0xFF);
+          uint8_t  prod = (uint8_t)((v >> 16) & 0xFF);
+          uint16_t tms  = (uint16_t)(v & 0xFFFFu);
+
+          if (v == 0 || port == 0 || prod == 0 || tms == 0) {
+              Serial.printf("  1016:%u = FREE (value=0x%08lX)\n", si, (unsigned long)v);
+          } else {
+              Serial.printf("  1016:%u = ACTIVE: producer=%u, timeout=%u ms, port=%u (0x%08lX)\n",
+                            si, prod, (unsigned)tms, port, (unsigned long)v);
+          }
+      }
     } else if (command == "help") {
         Serial.println("Available commands:");
         Serial.println("  discover                    - scan for nodes on the CAN bus");
@@ -452,10 +641,27 @@ static void processCommand(const String& cmd) {
         Serial.println("  get_node_heartbeat <id>     - read 0x1017 from a remote node");
         Serial.println("  set_node_heartbeat <id> <ms>- write 0x1017 on a remote node");
         Serial.println("  get_consumer_entry <id> <k> - read 0x1016:<k> from a remote node");
-        Serial.println("  set_consumer_entry <id> <k> <node> <hb_ms> - write 0x1016:<k> on a remote node");
+        Serial.println("  set_consumer_entry <id> <prodId> <ms> [port=1] - set 1016:<subIdx>");
+        Serial.println("  clear_consumer_entry <id> <subIdx>                      - clear 1016:<subIdx>");
     } else {
         Serial.print("Unknown command: ");
         Serial.println(command);
         Serial.println("Type 'help' for a list of commands.");
     }
 }
+
+
+//possiveis comandos
+//Descobrir nós: discover
+
+//--------------HEARTBEAT PRODUCER COMMANDS----------------
+//get heartbeat do mestre: heartbeat_master
+//set heartbeat do mestre: heartbeat_master <timer_ms>
+//get heartbeat do algum nó: heartbeat <nodeId>
+//set heartbeat de algum nó: heartbeat_node <nodeId> <timer_ms>
+//get heartbeat de todos os nós presentes, inclusive o mestre: heartbeat_all
+//--------------HEARTBEAT CONSUMER COMMANDS----------------
+//get heartbeat watchers do mestre: get_master_entries <subIdx> - ? alterar aqui
+//set heartbeat watcher do mestre: set_master_entry <nodeId> <producerId> <timeout_ms>
+//get heartbeat watcher de todos os nós: get_all_nodes_entries <subIdx> - ? pesquisar isso aqui.
+
