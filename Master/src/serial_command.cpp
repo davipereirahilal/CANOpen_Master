@@ -651,17 +651,55 @@ static void processCommand(const String& cmd) {
 }
 
 
-//possiveis comandos
-//Descobrir nós: discover
+//APRENDER USAR EDITOR CAN.
+//possiveis comandos - criar comandos.
+//---------------------------------------------------------------------------------------
+//----------------------------- FIND/DETECT NODES ON CAN  --------------------------------
+//----------------------------------------------------------------------------------------
+//Descobrir todos os nós: discover <timeout_ms>
+//is node present?: is_node_present <nodeId> <timeout_ms>
+//----------------------------------------------------------------------------------------
 
-//--------------HEARTBEAT PRODUCER COMMANDS----------------
+//---------------------------------------------------------------------------------------
+//------------------------------- NODES INFO---------------------------------------------
+//----------------------------------------------------------------------------------------
+//get informações do mestre: get_master_info
+//get informações de algum NODE: get_node_info <nodeId>
+//get informações de todos os NODES: get_all_nodes_info
+//----------------------------------------------------------------------------------------
+
+//----------------------------------------------------------------------------------------
+//--------------------------------OP MODES COMMANDS--------------------------------------
+//----------------------------------------------------------------------------------------
+//get master operation mode: get_op_master
+//set master operation mode: set_op_master <mode>
+//get node operation mode: get_op_node <nodeId>
+//set node operation mode: set_op_node <nodeId> <mode>
+//get all nodes op mode: get_all_op
+//----------------------------------------------------------------------------------------
+
+//----------------------------------------------------------------------------------------
+//--------------------------------HEARTBEAT COMMANDS--------------------------------------
+//----------------------------------------------------------------------------------------
+//#### HEARTBEAT PRODUCER COMMANDS ####
 //get heartbeat do mestre: heartbeat_master
 //set heartbeat do mestre: heartbeat_master <timer_ms>
 //get heartbeat do algum nó: heartbeat <nodeId>
 //set heartbeat de algum nó: heartbeat_node <nodeId> <timer_ms>
 //get heartbeat de todos os nós presentes, inclusive o mestre: heartbeat_all
-//--------------HEARTBEAT CONSUMER COMMANDS----------------
+//#### HEARTBEAT CONSUMER COMMANDS ####
 //get heartbeat watchers do mestre: get_master_entries <subIdx> - ? alterar aqui
-//set heartbeat watcher do mestre: set_master_entry <nodeId> <producerId> <timeout_ms>
+//set heartbeat watcher do mestre: set_master_entry <nodeId> <producerId> <timeout_ms> // Talvez Seja sempre entre mestre e escravo. Setar watcher do mestre em relacao ao slave e slave em relacao ao mestre. Aprender sobre os error.
+//get heartbeat watcher de algum nó: get_node_entry <nodeId> <subIdx> - conferir       // talvez nao precie, pois os producer/consumer são todos em relação ao master.
+//set heartbeat watcher de algum nó: set_node_entry <nodeId> <producerId> <timeout_ms> // Entao, todas as configs. serão feitas pelos 2 comandos acima.
+
 //get heartbeat watcher de todos os nós: get_all_nodes_entries <subIdx> - ? pesquisar isso aqui.
+//----------------------------------------------------------------------------------------
+
+
+
+//----------------------------------------------------------------------------------------
+//--------------------------------MCP MOTOR COMMANDS--------------------------------------
+//----------------------------------------------------------------------------------------
+
 
